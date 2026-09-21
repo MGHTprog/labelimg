@@ -20,6 +20,16 @@ LabelImg is a graphical image annotation tool.
 
 It is written in Python and uses Qt for its graphical interface.
 
+Positive-feedback edition
+-------------------------
+
+This edition adds lightweight visual feedback for annotation work:
+
+* an animated green progress bar showing the current image, total, and percentage;
+* short confirmations when an annotation is added or saved;
+* a completion message when the final image is reached; and
+* thicker four-pixel bounding-box outlines for improved visibility.
+
 Annotations are saved as XML files in PASCAL VOC format, the format used
 by `ImageNet <http://www.image-net.org/>`__.  Besides, it also supports YOLO and CreateML formats.
 

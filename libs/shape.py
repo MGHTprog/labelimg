@@ -88,8 +88,10 @@ class Shape(object):
         if self.points:
             color = self.select_line_color if self.selected else self.line_color
             pen = QPen(color)
-            # Try using integer sizes for smoother drawing(?)
-            pen.setWidth(max(1, int(round(2.0 / self.scale))))
+            # Keep bounding boxes clearly visible at every zoom level.
+            # The painter is scaled by the canvas, so compensate here to
+            # maintain an approximately four-pixel line on screen.
+            pen.setWidth(max(1, int(round(4.0 / self.scale))))
             painter.setPen(pen)
 
             line_path = QPainterPath()

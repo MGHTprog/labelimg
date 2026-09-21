@@ -505,6 +505,32 @@ class MainWindow(QMainWindow, WindowMixin):
         self.label_coordinates = QLabel('')
         self.statusBar().addPermanentWidget(self.label_coordinates)
 
+        # Persistent, animated feedback for annotation sessions.
+        self.progress_feedback = QLabel('')
+        self.progress_feedback.setMinimumWidth(120)
+        self.progress_feedback.setAlignment(Qt.AlignCenter)
+        self.annotation_progress = QProgressBar()
+        self.annotation_progress.setObjectName('annotationProgress')
+        self.annotation_progress.setRange(0, 100)
+        self.annotation_progress.setValue(0)
+        self.annotation_progress.setMinimumWidth(190)
+        self.annotation_progress.setMaximumWidth(280)
+        self.annotation_progress.setStyleSheet(
+            'QProgressBar#annotationProgress {'
+            ' border: 1px solid #8ca58f; border-radius: 5px;'
+            ' background: #eef3ef; text-align: center; color: #263b2a; }'
+            'QProgressBar#annotationProgress::chunk {'
+            ' background-color: #55a868; border-radius: 4px; }'
+        )
+        self.progress_animation = QPropertyAnimation(self.annotation_progress, b'value', self)
+        self.progress_animation.setDuration(280)
+        self.feedback_timer = QTimer(self)
+        self.feedback_timer.setSingleShot(True)
+        self.feedback_timer.timeout.connect(self.progress_feedback.clear)
+        self.statusBar().addPermanentWidget(self.progress_feedback)
+        self.statusBar().addPermanentWidget(self.annotation_progress)
+        self.update_annotation_progress(animate=False)
+
         # Open Dir if default file
         if self.file_path and os.path.isdir(self.file_path):
             self.open_dir_dialog(dir_path=self.file_path, silent=True)
@@ -607,6 +633,31 @@ class MainWindow(QMainWindow, WindowMixin):
 
     def status(self, message, delay=5000):
         self.statusBar().showMessage(message, delay)
+
+    def show_positive_feedback(self, message, delay=2200):
+        """Show a short, non-blocking confirmation beside the progress bar."""
+        self.progress_feedback.setText(message)
+        self.feedback_timer.start(delay)
+
+    def update_annotation_progress(self, animate=True):
+        """Update directory progress without blocking image navigation."""
+        total = max(0, self.img_count)
+        has_active_image = bool(self.file_path) and not self.image.isNull()
+        current = min(self.cur_img_idx + 1, total) if total and has_active_image else 0
+        percent = int(round((current * 100.0) / total)) if total else 0
+        self.annotation_progress.setFormat('%d / %d  (%d%%)' % (current, total, percent))
+        self.annotation_progress.setToolTip('Image annotation progress')
+
+        self.progress_animation.stop()
+        if animate:
+            self.progress_animation.setStartValue(self.annotation_progress.value())
+            self.progress_animation.setEndValue(percent)
+            self.progress_animation.start()
+        else:
+            self.annotation_progress.setValue(percent)
+
+        if total > 1 and current == total:
+            self.show_positive_feedback(u'Great work! All images reached \u2713', 3500)
 
     def reset_state(self):
         self.items_to_shapes.clear()
@@ -952,6 +1003,7 @@ class MainWindow(QMainWindow, WindowMixin):
             else:
                 self.actions.editMode.setEnabled(True)
             self.set_dirty()
+            self.show_positive_feedback(u'Annotation added \u2713', 1400)
 
             if text not in self.label_hist:
                 self.label_hist.append(text)
@@ -1112,6 +1164,7 @@ class MainWindow(QMainWindow, WindowMixin):
 
             counter = self.counter_str()
             self.setWindowTitle(__appname__ + ' ' + file_path + ' ' + counter)
+            self.update_annotation_progress()
 
             # Default : select last item if there is at least one item
             if self.label_list.count():
@@ -1299,6 +1352,8 @@ class MainWindow(QMainWindow, WindowMixin):
         self.file_list_widget.clear()
         self.m_img_list = self.scan_all_images(dir_path)
         self.img_count = len(self.m_img_list)
+        self.cur_img_idx = 0
+        self.update_annotation_progress(animate=False)
         self.open_next_image()
         for imgPath in self.m_img_list:
             item = QListWidgetItem(imgPath)
@@ -1431,6 +1486,7 @@ class MainWindow(QMainWindow, WindowMixin):
             self.set_clean()
             self.statusBar().showMessage('Saved to  %s' % annotation_file_path)
             self.statusBar().show()
+            self.show_positive_feedback(u'Saved successfully \u2713')
 
     def close_file(self, _value=False):
         if not self.may_continue():
