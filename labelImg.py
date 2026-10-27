@@ -36,7 +36,7 @@ from libs.utils import *
 from libs.settings import Settings
 from libs.shape import Shape, DEFAULT_LINE_COLOR, DEFAULT_FILL_COLOR
 from libs.stringBundle import StringBundle
-from libs.canvas import Canvas
+from libs.canvas import Canvas, DetailMagnifier
 from libs.zoomWidget import ZoomWidget
 from libs.labelDialog import LabelDialog
 from libs.colorDialog import ColorDialog
@@ -102,11 +102,12 @@ class MainWindow(QMainWindow, WindowMixin):
         self.last_open_dir = None
         self.cur_img_idx = 0
         self.img_count = 1
+        self.copied_shapes = []
 
         # Whether we need to save or not.
         self.dirty = False
 
-        self._no_selection_slot = False
+        self._syncing_selection = False
         self._beginner = True
         self.screencast = "https://youtu.be/p0nR2YsCY_U"
 
@@ -151,6 +152,8 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # Create and add a widget for showing current label items
         self.label_list = QListWidget()
+        self.label_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.label_list.setToolTip('按住 Ctrl 单击或按住 Shift 连续选择多个标注框，然后按 Ctrl+C 复制')
         label_list_container = QWidget()
         label_list_container.setLayout(list_layout)
         self.label_list.itemActivated.connect(self.label_selection_changed)
@@ -170,7 +173,10 @@ class MainWindow(QMainWindow, WindowMixin):
         self.file_list_widget.itemDoubleClicked.connect(self.file_item_double_clicked)
         file_list_layout = QVBoxLayout()
         file_list_layout.setContentsMargins(0, 0, 0, 0)
-        file_list_layout.addWidget(self.file_list_widget)
+        file_list_row = QHBoxLayout()
+        file_list_row.setContentsMargins(0, 0, 0, 0)
+        file_list_row.addWidget(self.file_list_widget, 1)
+        file_list_layout.addLayout(file_list_row, 1)
         file_list_container = QWidget()
         file_list_container.setLayout(file_list_layout)
         self.file_dock = QDockWidget(get_str('fileList'), self)
@@ -187,10 +193,15 @@ class MainWindow(QMainWindow, WindowMixin):
         scroll = QScrollArea()
         scroll.setWidget(self.canvas)
         scroll.setWidgetResizable(True)
+        self.canvas.detail_magnifier = DetailMagnifier(self.canvas, file_list_container)
+        file_list_row.insertWidget(0, self.canvas.detail_magnifier.vertical_panel)
+        file_list_layout.addWidget(self.canvas.detail_magnifier.panel)
         self.scroll_bars = {
             Qt.Vertical: scroll.verticalScrollBar(),
             Qt.Horizontal: scroll.horizontalScrollBar()
         }
+        for scrollbar in self.scroll_bars.values():
+            scrollbar.valueChanged.connect(lambda value: self.canvas.detail_magnifier.set_point(self.canvas.detail_magnifier.point))
         self.scroll_area = scroll
         self.canvas.scrollRequest.connect(self.scroll_request)
 
@@ -223,7 +234,7 @@ class MainWindow(QMainWindow, WindowMixin):
 
         open_annotation = action(get_str('openAnnotation'), self.open_annotation_dialog,
                                  'Ctrl+Shift+O', 'open', get_str('openAnnotationDetail'))
-        copy_prev_bounding = action(get_str('copyPrevBounding'), self.copy_previous_bounding_boxes, 'Ctrl+v', 'copy', get_str('copyPrevBounding'))
+        copy_prev_bounding = action(get_str('copyPrevBounding'), self.copy_previous_bounding_boxes, 'Ctrl+Shift+V', 'copy', get_str('copyPrevBounding'))
 
         open_next_image = action(get_str('nextImg'), self.open_next_image,
                                  'd', 'next', get_str('nextImgDetail'))
@@ -277,6 +288,8 @@ class MainWindow(QMainWindow, WindowMixin):
         copy = action(get_str('dupBox'), self.copy_selected_shape,
                       'Ctrl+D', 'copy', get_str('dupBoxDetail'),
                       enabled=False)
+        copy_box = action('复制标注框', self.copy_box, 'Ctrl+C', 'copy', '复制选中的标注框', enabled=False)
+        paste_box = action('粘贴标注框', self.paste_box, 'Ctrl+V', None, '粘贴已复制的标注框')
 
         advanced_mode = action(get_str('advancedMode'), self.toggle_advanced_mode,
                                'Ctrl+Shift+A', 'expert', get_str('advancedModeDetail'),
@@ -356,7 +369,7 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # Store actions for further handling.
         self.actions = Struct(save=save, save_format=save_format, saveAs=save_as, open=open, close=close, resetAll=reset_all, deleteImg=delete_image,
-                              lineColor=color1, create=create, delete=delete, edit=edit, copy=copy,
+                              lineColor=color1, create=create, delete=delete, edit=edit, copy=copy, copyBox=copy_box, pasteBox=paste_box,
                               createMode=create_mode, editMode=edit_mode, advancedMode=advanced_mode,
                               shapeLineColor=shape_line_color, shapeFillColor=shape_fill_color,
                               zoom=zoom, zoomIn=zoom_in, zoomOut=zoom_out, zoomOrg=zoom_org,
@@ -365,10 +378,10 @@ class MainWindow(QMainWindow, WindowMixin):
                               fileMenuActions=(
                                   open, open_dir, save, save_as, close, reset_all, quit),
                               beginner=(), advanced=(),
-                              editMenu=(edit, copy, delete,
+                              editMenu=(edit, copy, copy_box, paste_box, delete,
                                         None, color1, self.draw_squares_option),
-                              beginnerContext=(create, edit, copy, delete),
-                              advancedContext=(create_mode, edit_mode, edit, copy,
+                              beginnerContext=(create, edit, copy, copy_box, paste_box, delete),
+                              advancedContext=(create_mode, edit_mode, edit, copy, copy_box, paste_box,
                                                delete, shape_line_color, shape_fill_color),
                               onLoadActive=(
                                   close, create, create_mode, edit_mode),
@@ -398,6 +411,10 @@ class MainWindow(QMainWindow, WindowMixin):
         self.display_label_option.setCheckable(True)
         self.display_label_option.setChecked(settings.get(SETTING_PAINT_LABEL, False))
         self.display_label_option.triggered.connect(self.toggle_paint_labels_option)
+        detail_magnifier = QAction('标注框边缘放大镜', self)
+        detail_magnifier.setCheckable(True)
+        detail_magnifier.setChecked(True)
+        detail_magnifier.toggled.connect(self.toggle_detail_magnifier)
 
         add_actions(self.menus.file,
                     (open, open_dir, change_save_dir, open_annotation, copy_prev_bounding, self.menus.recentFiles, save, save_format, save_as, close, reset_all, delete_image, quit))
@@ -406,6 +423,7 @@ class MainWindow(QMainWindow, WindowMixin):
             self.auto_saving,
             self.single_class_mode,
             self.display_label_option,
+            detail_magnifier,
             labels, advanced_mode, None,
             hide_all, show_all, None,
             zoom_in, zoom_out, zoom_org, None,
@@ -817,16 +835,20 @@ class MainWindow(QMainWindow, WindowMixin):
 
     # React to canvas signals.
     def shape_selection_changed(self, selected=False):
-        if self._no_selection_slot:
-            self._no_selection_slot = False
-        else:
-            shape = self.canvas.selected_shape
-            if shape:
-                self.shapes_to_items[shape].setSelected(True)
-            else:
-                self.label_list.clearSelection()
+        if self._syncing_selection:
+            return
+        self._syncing_selection = True
+        try:
+            self.label_list.clearSelection()
+            for shape in self.canvas.shapes:
+                shape.selected = shape is self.canvas.selected_shape
+            if self.canvas.selected_shape:
+                self.shapes_to_items[self.canvas.selected_shape].setSelected(True)
+        finally:
+            self._syncing_selection = False
         self.actions.delete.setEnabled(selected)
         self.actions.copy.setEnabled(selected)
+        self.actions.copyBox.setEnabled(selected)
         self.actions.edit.setEnabled(selected)
         self.actions.shapeLineColor.setEnabled(selected)
         self.actions.shapeFillColor.setEnabled(selected)
@@ -941,6 +963,61 @@ class MainWindow(QMainWindow, WindowMixin):
         # fix copy and delete
         self.shape_selection_changed(True)
 
+    def copy_box(self):
+        selected = set(self.label_list.selectedItems())
+        shapes = [shape for shape in self.canvas.shapes
+                  if self.shapes_to_items[shape] in selected]
+        if shapes:
+            self.copied_shapes = [shape.copy() for shape in shapes]
+            self.statusBar().showMessage('已复制 %d 个标注框' % len(shapes), 3000)
+
+    def paste_box(self):
+        if not self.copied_shapes:
+            self.statusBar().showMessage('请先选择并复制标注框', 3000)
+            return
+        pixmap = self.canvas.pixmap
+        if not self.file_path or pixmap is None or pixmap.isNull():
+            self.statusBar().showMessage('请先打开图片', 3000)
+            return
+        shapes = [shape.copy() for shape in self.copied_shapes]
+        points = [point for shape in shapes for point in shape.points]
+        if not points:
+            return
+        left, right = min(p.x() for p in points), max(p.x() for p in points)
+        top, bottom = min(p.y() for p in points), max(p.y() for p in points)
+        if right - left > pixmap.width() or bottom - top > pixmap.height():
+            self.statusBar().showMessage('\u6807\u6ce8\u6846\u7ec4\u5927\u4e8e\u5f53\u524d\u56fe\u7247\uff0c\u65e0\u6cd5\u7c98\u8d34', 5000)
+            return
+        viewport = self.scroll_area.viewport()
+        global_pos = QCursor.pos()
+        widget_pos = self.canvas.mapFromGlobal(global_pos)
+        if viewport.rect().contains(viewport.mapFromGlobal(global_pos)):
+            image_pos = self.canvas.transform_pos(widget_pos)
+            if not self.canvas.out_of_pixmap(image_pos):
+                self.canvas.last_image_mouse_pos = QPointF(image_pos)
+        target = self.canvas.last_image_mouse_pos
+        if target is None:
+            self.statusBar().showMessage('\u8bf7\u5148\u5c06\u9f20\u6807\u79fb\u5230\u56fe\u7247\u4e0a\u7684\u7c98\u8d34\u4f4d\u7f6e', 5000)
+            return
+        dx = max(-left, min(target.x() - (left + right) / 2.0, pixmap.width() - right))
+        dy = max(-top, min(target.y() - (top + bottom) / 2.0, pixmap.height() - bottom))
+        for shape in shapes:
+            shape.move_by(QPointF(dx, dy))
+        self.canvas.de_select_shape()
+        self._syncing_selection = True
+        try:
+            self.label_list.clearSelection()
+            for shape in shapes:
+                shape.selected = False
+                self.canvas.shapes.append(shape)
+                self.add_label(shape)
+                self.shapes_to_items[shape].setSelected(True)
+        finally:
+            self._syncing_selection = False
+        self.label_selection_changed()
+        self.set_dirty()
+        self.statusBar().showMessage('已粘贴 %d 个标注框，请保存' % len(shapes), 3000)
+
     def combo_selection_changed(self, index):
         text = self.combo_box.cb.itemText(index)
         for i in range(self.label_list.count()):
@@ -952,13 +1029,34 @@ class MainWindow(QMainWindow, WindowMixin):
                 self.label_list.item(i).setCheckState(2)
 
     def label_selection_changed(self):
-        item = self.current_item()
-        if item and self.canvas.editing():
-            self._no_selection_slot = True
-            self.canvas.select_shape(self.items_to_shapes[item])
-            shape = self.items_to_shapes[item]
-            # Add Chris
-            self.diffc_button.setChecked(shape.difficult)
+        if self._syncing_selection or not self.canvas.editing():
+            return
+        items = self.label_list.selectedItems()
+        self._syncing_selection = True
+        try:
+            if items:
+                shape = self.items_to_shapes[items[-1]]
+                self.canvas.select_shape(shape)
+                selected_shapes = {self.items_to_shapes[item] for item in items}
+                for candidate in self.canvas.shapes:
+                    candidate.selected = candidate in selected_shapes
+                blocked = self.diffc_button.blockSignals(True)
+                try:
+                    self.diffc_button.setChecked(shape.difficult)
+                finally:
+                    self.diffc_button.blockSignals(blocked)
+            else:
+                self.canvas.de_select_shape()
+                for candidate in self.canvas.shapes:
+                    candidate.selected = False
+            self.canvas.update()
+        finally:
+            self._syncing_selection = False
+        one = len(items) == 1
+        self.actions.copyBox.setEnabled(bool(items))
+        for action in (self.actions.delete, self.actions.copy, self.actions.edit,
+                       self.actions.shapeLineColor, self.actions.shapeFillColor):
+            action.setEnabled(one)
 
     def label_item_changed(self, item):
         shape = self.items_to_shapes[item]
@@ -1639,6 +1737,11 @@ class MainWindow(QMainWindow, WindowMixin):
     def toggle_paint_labels_option(self):
         for shape in self.canvas.shapes:
             shape.paint_label = self.display_label_option.isChecked()
+
+    def toggle_detail_magnifier(self, enabled):
+        magnifier = self.canvas.detail_magnifier
+        magnifier.enabled = enabled
+        magnifier.set_point(magnifier.point)
 
     def toggle_draw_square(self):
         self.canvas.set_drawing_shape_to_square(self.draw_squares_option.isChecked())

@@ -88,10 +88,9 @@ class Shape(object):
         if self.points:
             color = self.select_line_color if self.selected else self.line_color
             pen = QPen(color)
-            # Keep bounding boxes clearly visible at every zoom level.
-            # The painter is scaled by the canvas, so compensate here to
-            # maintain an approximately four-pixel line on screen.
-            pen.setWidth(max(1, int(round(4.0 / self.scale))))
+            # A cosmetic pen stays one screen pixel wide at every zoom level.
+            pen.setWidth(1)
+            pen.setCosmetic(True)
             painter.setPen(pen)
 
             line_path = QPainterPath()

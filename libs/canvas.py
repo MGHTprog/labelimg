@@ -18,6 +18,138 @@ CURSOR_DRAW = Qt.CrossCursor
 CURSOR_MOVE = Qt.ClosedHandCursor
 CURSOR_GRAB = Qt.OpenHandCursor
 
+class EdgeMagnifier(QWidget):
+    def __init__(self, canvas, viewport, horizontal):
+        super(EdgeMagnifier, self).__init__(viewport)
+        self.canvas = canvas
+        self.horizontal = horizontal
+        self.image_origin = QPointF()
+        self.scale_x = self.scale_y = 1.0
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.hide()
+
+    def configure(self, width, height, origin, scale_x, scale_y):
+        self.image_origin = origin
+        self.scale_x, self.scale_y = scale_x, scale_y
+        self.setFixedSize(width, height)
+        self.show()
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor(38, 38, 38))
+        painter.setClipRect(self.rect())
+        painter.scale(self.scale_x, self.scale_y)
+        painter.translate(-self.image_origin.x(), -self.image_origin.y())
+        painter.drawPixmap(0, 0, self.canvas.pixmap)
+        old_scale = Shape.scale
+        Shape.scale = max(self.scale_x, self.scale_y)
+        try:
+            for shape in self.canvas.shapes:
+                if self.canvas.isVisible(shape):
+                    old_fill, old_label = shape.fill, shape.paint_label
+                    shape.fill, shape.paint_label = False, False
+                    try:
+                        shape.paint(painter)
+                    finally:
+                        shape.fill, shape.paint_label = old_fill, old_label
+            if self.canvas.current:
+                self.canvas.current.paint(painter)
+                self.canvas.line.paint(painter)
+        finally:
+            Shape.scale = old_scale
+        painter.resetTransform()
+        painter.setClipping(False)
+        painter.setPen(QPen(QColor(255, 255, 255), 1))
+        painter.drawRect(self.rect().adjusted(0, 0, -1, -1))
+        painter.end()
+
+
+class DetailMagnifier(QObject):
+    def __init__(self, canvas, parent):
+        super(DetailMagnifier, self).__init__(parent)
+        self.canvas = canvas
+        self.point = None
+        self.enabled = True
+        self.panel = QWidget(parent)
+        layout = QVBoxLayout(self.panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(3)
+        self.horizontal_label = QLabel('水平边缘（选择标注框）')
+        self.vertical_label = QLabel('竖直边缘（选择标注框）')
+        self.horizontal_scroll = QScrollArea()
+        self.horizontal_scroll.setFixedHeight(100)
+        self.horizontal_scroll.setWidgetResizable(False)
+        self.horizontal_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.horizontal = EdgeMagnifier(canvas, self.horizontal_scroll.viewport(), True)
+        self.horizontal_scroll.setWidget(self.horizontal)
+        self.vertical_scroll = QScrollArea()
+        self.vertical_scroll.setMinimumHeight(100)
+        self.vertical_scroll.setFixedWidth(98)
+        self.vertical_scroll.setWidgetResizable(False)
+        self.vertical_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.vertical = EdgeMagnifier(canvas, self.vertical_scroll.viewport(), False)
+        self.vertical_scroll.setWidget(self.vertical)
+        for widget in (self.horizontal_label, self.horizontal_scroll):
+            layout.addWidget(widget)
+        self.vertical_panel = QWidget(parent)
+        self.vertical_panel.setFixedWidth(100)
+        vertical_layout = QVBoxLayout(self.vertical_panel)
+        vertical_layout.setContentsMargins(0, 0, 0, 0)
+        vertical_layout.setSpacing(3)
+        vertical_layout.addWidget(self.vertical_label)
+        vertical_layout.addWidget(self.vertical_scroll)
+
+    def set_point(self, point):
+        self.point = point
+        canvas = self.canvas
+        if not self.enabled:
+            self.panel.hide()
+            self.vertical_panel.hide()
+            return
+        self.panel.show()
+        self.vertical_panel.show()
+        if point is None or not canvas.pixmap or canvas.out_of_pixmap(point):
+            self.horizontal.hide()
+            self.vertical.hide()
+            return
+        shape = canvas.selected_shape
+        if canvas.current and canvas.line and len(canvas.line) == 2:
+            first, last = canvas.line[0], canvas.line[1]
+            left, right = sorted((first.x(), last.x()))
+            top, bottom = sorted((first.y(), last.y()))
+        elif shape and shape.points:
+            left = min(p.x() for p in shape.points)
+            right = max(p.x() for p in shape.points)
+            top = min(p.y() for p in shape.points)
+            bottom = max(p.y() for p in shape.points)
+        else:
+            self.horizontal.hide()
+            self.vertical.hide()
+            return
+        if right <= left or bottom <= top:
+            self.horizontal.hide()
+            self.vertical.hide()
+            return
+        detail_scale = max(4.0, 4.0 * canvas.scale)
+        width = max(1, min(16000, int(round((right - left) * detail_scale))))
+        height = max(1, min(16000, int(round((bottom - top) * detail_scale))))
+        sx, sy = width / (right - left), height / (bottom - top)
+        thickness = 72
+        use_top = abs(point.y() - top) <= abs(point.y() - bottom)
+        use_left = abs(point.x() - left) <= abs(point.x() - right)
+        edge_y = top if use_top else bottom
+        edge_x = left if use_left else right
+        self.horizontal_label.setText('水平边缘：上' if use_top else '水平边缘：下')
+        self.vertical_label.setText('竖直边缘：左' if use_left else '竖直边缘：右')
+        self.horizontal.configure(width, thickness,
+                                  QPointF(left, edge_y - thickness / (2.0 * detail_scale)), sx, detail_scale)
+        self.vertical.configure(thickness, height,
+                                QPointF(edge_x - thickness / (2.0 * detail_scale), top), detail_scale, sy)
+        self.horizontal_scroll.horizontalScrollBar().setValue(int((point.x() - left) * sx - self.horizontal_scroll.viewport().width() / 2))
+        self.vertical_scroll.verticalScrollBar().setValue(int((point.y() - top) * sy - self.vertical_scroll.viewport().height() / 2))
+
+
 # class Canvas(QGLWidget):
 
 
@@ -41,6 +173,10 @@ class Canvas(QWidget):
         self.current = None
         self.selected_shape = None  # save the selected shape here
         self.selected_shape_copy = None
+        self.group_drag_shapes = []
+        self.group_drag_prev = None
+        self.detail_magnifier = None
+        self.last_image_mouse_pos = None
         self.drawing_line_color = QColor(0, 0, 255)
         self.drawing_rect_color = QColor(0, 0, 255)
         self.line = Shape(line_color=self.drawing_line_color)
@@ -108,6 +244,11 @@ class Canvas(QWidget):
     def mouseMoveEvent(self, ev):
         """Update line with last point and current coordinates."""
         pos = self.transform_pos(ev.pos())
+        if self.pixmap and not self.out_of_pixmap(pos):
+            self.last_image_mouse_pos = QPointF(pos)
+        if self.detail_magnifier:
+            self.detail_magnifier.set_point(pos)
+            QTimer.singleShot(0, lambda: self.detail_magnifier.set_point(self.detail_magnifier.point))
 
         # Update coordinates in status bar if image is opened
         window = self.parent().window()
@@ -174,6 +315,18 @@ class Canvas(QWidget):
 
         # Polygon/Vertex moving.
         if Qt.LeftButton & ev.buttons():
+            if self.group_drag_shapes and self.group_drag_prev is not None:
+                points = [point for shape in self.group_drag_shapes for point in shape.points]
+                delta = pos - self.group_drag_prev
+                dx = max(-min(p.x() for p in points), min(delta.x(), self.pixmap.width() - max(p.x() for p in points)))
+                dy = max(-min(p.y() for p in points), min(delta.y(), self.pixmap.height() - max(p.y() for p in points)))
+                if dx or dy:
+                    for shape in self.group_drag_shapes:
+                        shape.move_by(QPointF(dx, dy))
+                    self.shapeMoved.emit()
+                    self.update()
+                self.group_drag_prev = pos
+                return
             if self.selected_vertex():
                 self.bounded_move_vertex(pos)
                 self.shapeMoved.emit()
@@ -254,11 +407,24 @@ class Canvas(QWidget):
 
     def mousePressEvent(self, ev):
         pos = self.transform_pos(ev.pos())
+        if self.pixmap and not self.out_of_pixmap(pos):
+            self.last_image_mouse_pos = QPointF(pos)
 
         if ev.button() == Qt.LeftButton:
             if self.drawing():
                 self.handle_drawing(pos)
             else:
+                if ev.modifiers() & Qt.ShiftModifier:
+                    shape = next((s for s in reversed(self.shapes) if self.isVisible(s) and s.contains_point(pos)), None)
+                    if shape:
+                        window = self.parent().window()
+                        item = window.shapes_to_items[shape]
+                        if not item.isSelected():
+                            item.setSelected(True)
+                        self.group_drag_shapes = [s for s in self.shapes if s.selected]
+                        self.group_drag_prev = pos
+                        self.update()
+                        return
                 selection = self.select_shape_point(pos)
                 self.prev_point = pos
 
@@ -273,6 +439,11 @@ class Canvas(QWidget):
         self.update()
 
     def mouseReleaseEvent(self, ev):
+        if ev.button() == Qt.LeftButton and self.group_drag_shapes:
+            self.group_drag_shapes = []
+            self.group_drag_prev = None
+            self.override_cursor(CURSOR_GRAB)
+            return
         if ev.button() == Qt.RightButton:
             menu = self.menus[bool(self.selected_shape_copy)]
             self.restore_cursor()
@@ -506,7 +677,7 @@ class Canvas(QWidget):
         Shape.label_font_size = self.label_font_size
         for shape in self.shapes:
             if (shape.selected or not self._hide_background) and self.isVisible(shape):
-                shape.fill = shape.selected or shape == self.h_shape
+                shape.fill = False
                 shape.paint(p)
         if self.current:
             self.current.paint(p)
@@ -521,8 +692,7 @@ class Canvas(QWidget):
             rect_width = right_bottom.x() - left_top.x()
             rect_height = right_bottom.y() - left_top.y()
             p.setPen(self.drawing_rect_color)
-            brush = QBrush(Qt.BDiagPattern)
-            p.setBrush(brush)
+            p.setBrush(Qt.NoBrush)
             p.drawRect(left_top.x(), left_top.y(), rect_width, rect_height)
 
         if self.drawing() and not self.prev_point.isNull() and not self.out_of_pixmap(self.prev_point):
@@ -723,6 +893,11 @@ class Canvas(QWidget):
 
     def reset_state(self):
         self.restore_cursor()
+        if self.detail_magnifier:
+            self.detail_magnifier.set_point(None)
+        self.group_drag_shapes = []
+        self.group_drag_prev = None
+        self.last_image_mouse_pos = None
         self.pixmap = None
         self.update()
 
